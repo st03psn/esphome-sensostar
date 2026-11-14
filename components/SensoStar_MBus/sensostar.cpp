@@ -1,14 +1,67 @@
 #include "sensostar.h"
 #include <vector>
+#include <initializer_list>
+#include <string>
 #include "esphome/core/log.h"
 #include "esphome/core/helpers.h"
+#include "mbus_decode.h"
 
 namespace esphome {
 namespace sensostar {
 
 static const char *const TAG = "SensoStar";
 
-void SensoStarComponent::setup() { }
+void SensoStarComponent::setup() {
+    if (this->probe_)
+        this->build_probe_list_();
+}
+
+// Build a long frame 68 L L 68 <body> CS 16
+static std::vector<uint8_t> long_frame(std::initializer_list<uint8_t> body) {
+    std::vector<uint8_t> f = {0x68, (uint8_t) body.size(), (uint8_t) body.size(), 0x68};
+    uint8_t cs = 0;
+    for (uint8_t b : body) { f.push_back(b); cs += b; }
+    f.push_back(cs);
+    f.push_back(0x16);
+    return f;
+}
+static std::vector<uint8_t> short_frame(uint8_t c, uint8_t a) {
+    return {0x10, c, a, (uint8_t) (c + a), 0x16};
+}
+
+void SensoStarComponent::build_probe_list_() {
+    static char names[64][24];
+    // A) Proprietary selection (same command as the normal readout) with a single item ID each.
+    for (uint8_t id = 0; id < 0x40; id++) {
+        snprintf(names[id], sizeof(names[id]), "select item 0x%02X", id);
+        this->probe_list_.push_back({names[id], long_frame({0x53, 0xFE, 0x51, 0x0F, 0x00, 0x00, 0x01, 0x59, id}), false});
+    }
+    // B) Standard M-Bus readout (REQ_UD2), both FCB states.
+    this->probe_list_.push_back({"REQ_UD2 FCB=0", short_frame(0x5B, 0xFE), false});
+    this->probe_list_.push_back({"REQ_UD2 FCB=1", short_frame(0x7B, 0xFE), false});
+    // C) Application reset, then REQ_UD2.
+    this->probe_list_.push_back({"SND_UD application reset (CI 50)", long_frame({0x53, 0xFE, 0x50}), true});
+    this->probe_list_.push_back({"REQ_UD2 after app reset", short_frame(0x5B, 0xFE), false});
+    // D) Application reset with subcode 0x10 (all user data), then REQ_UD2.
+    this->probe_list_.push_back({"SND_UD app reset subcode 10", long_frame({0x53, 0xFE, 0x50, 0x10}), true});
+    this->probe_list_.push_back({"REQ_UD2 after subcode 10", short_frame(0x7B, 0xFE), false});
+    // E) SND_NKE (link reset), then REQ_UD2.
+    this->probe_list_.push_back({"SND_NKE", short_frame(0x40, 0xFE), true});
+    this->probe_list_.push_back({"REQ_UD2 after SND_NKE", short_frame(0x5B, 0xFE), false});
+    ESP_LOGI(TAG, "PROBE mode: %u probes queued", (unsigned) this->probe_list_.size());
+}
+
+void SensoStarComponent::probe_finish_(const char *result) {
+    if (result != nullptr)
+        ESP_LOGI(TAG, "PROBE[%u] %s: %s", (unsigned) this->probe_idx_, this->probe_list_[this->probe_idx_].name, result);
+    this->probe_turn_ = this->probe_list_[this->probe_idx_].chain;  // chain: next trigger is a probe again
+    this->probe_active_ = false;
+    this->probe_idx_++;
+    if (this->probe_idx_ >= this->probe_list_.size()) {
+        ESP_LOGI(TAG, "PROBE mode: all probes done, re-running init sequence");
+        this->init_state_ = 0x00;  // restore the meter's normal readout mode
+    }
+}
 
 void SensoStarComponent::dump_config() {
     ESP_LOGCONFIG(TAG, "SensoStar M-Bus:");
@@ -72,6 +125,13 @@ void SensoStarComponent::loop() {
     }
 
     if ( this->receiving_ > 0 && ( now - this->last_transmission_ >= 500 + this->last_send_tx_offset_ ) ) {
+        if (this->probe_active_) {
+            std::string partial = this->data_.empty() ? "no answer" : "timeout, partial: " + format_hex_pretty(this->data_);
+            this->data_.clear();
+            this->receiving_ = 0;
+            this->probe_finish_(partial.c_str());
+            return;
+        }
         ESP_LOGW(TAG, "Last transmission too long ago. Reset RX index.");
         this->publish_nans_();
         this->data_.clear();
@@ -97,6 +157,10 @@ void SensoStarComponent::loop() {
                 // Acknowledge
                 this->data_.clear();
                 this->receiving_ = 0;
+                if (this->probe_active_) {
+                    this->probe_finish_("ACK (E5)");
+                    continue;
+                }
                 
                 if (this->init_state_ != 0xff)
                     this->init_state_ |= 0x10;
@@ -112,6 +176,17 @@ void SensoStarComponent::loop() {
         if ( this->data_.size() > 4 && this->data_.size() == this->data_[1]+6 ) {
                        
             ESP_LOGV(TAG, "M-Bus received: %s", format_hex_pretty(this->data_).c_str());
+
+            if (this->probe_active_) {
+                ESP_LOGI(TAG, "PROBE[%u] %s RX: %s", (unsigned) this->probe_idx_,
+                         this->probe_list_[this->probe_idx_].name, format_hex_pretty(this->data_).c_str());
+                for (auto &line : mbus_decode_records(this->data_))
+                    ESP_LOGI(TAG, "PROBE[%u]   %s", (unsigned) this->probe_idx_, line.c_str());
+                this->data_.clear();
+                this->receiving_ = 0;
+                this->probe_finish_(nullptr);
+                continue;
+            }
             
             if (this->data_[0] != 0x68 || this->data_[3] != 0x68){
                 this->publish_nans_();
@@ -329,13 +404,28 @@ void SensoStarComponent::loop() {
         }
     }
     
-    if (this->trigger_next_) {
+    if (this->trigger_next_ && !this->probe_active_) {  // never interrupt a pending probe
         this->trigger_next_ = false;
 
         this->flush();
         this->data_.clear();
         
-        if (this->init_state_ == 0x00 || this->init_state_ == 0x01){
+        bool probe_now = false;
+        if (this->init_state_ == 0xff && this->probe_ && this->probe_idx_ < this->probe_list_.size()) {
+            probe_now = this->probe_turn_;
+            this->probe_turn_ = !this->probe_turn_;
+        }
+        if (probe_now) {
+            const auto &p = this->probe_list_[this->probe_idx_];
+            ESP_LOGI(TAG, "PROBE[%u] %s TX: %s", (unsigned) this->probe_idx_, p.name, format_hex_pretty(p.msg).c_str());
+            this->write_array(p.msg.data(), p.msg.size());
+            this->last_transmission_ = now;
+            this->last_send_tx_offset_ = p.msg.size() * 11 * 1000 / 2400;
+            this->receiving_ = 1;
+            this->probe_active_ = true;
+            this->probe_turn_ = false;
+        }
+        else if (this->init_state_ == 0x00 || this->init_state_ == 0x01){
             uint8_t request_message[] = { 0x68, 0x08, 0x08, 0x68, 0x53, 0xFE, 0x51, 0x0F, 0x00, 0x00, 0x04, 0x5C, 0x11, 0x16 };
             ESP_LOGV(TAG, "M-Bus write: %s", format_hex_pretty(request_message, sizeof(request_message)).c_str());
             this->write_array(request_message, sizeof(request_message));

@@ -36,6 +36,7 @@ class SensoStarComponent : public PollingComponent, public uart::UARTDevice {
 #endif
 
   void set_data_led(output::BinaryOutput *data_led) { this->data_led_ = data_led; } // flash LED 
+  void set_probe(bool probe) { this->probe_ = probe; } // diagnostic probe mode
   
   void setup() override;
   void dump_config() override;
@@ -55,6 +56,20 @@ class SensoStarComponent : public PollingComponent, public uart::UARTDevice {
   uint8_t init_state_{0};
   bool trigger_next_{true};
   bool FCB_;
+
+  // ----- Probe mode (diagnostics) -----
+  struct Probe {
+    const char *name;
+    std::vector<uint8_t> msg;
+    bool chain;  // send the next probe on the next cycle without a normal readout in between
+  };
+  void build_probe_list_();
+  void probe_finish_(const char *result);
+  bool probe_{false};
+  bool probe_active_{false};
+  bool probe_turn_{false};
+  size_t probe_idx_{0};
+  std::vector<Probe> probe_list_;
 
   output::BinaryOutput *data_led_{nullptr}; // LED related
   uint32_t data_led_off_time_{0}; // LED related
