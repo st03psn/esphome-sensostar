@@ -55,8 +55,10 @@ equal the return interval shifted by ΔT. The midpoint of that intersection is p
 Example: 29 °C / 26 °C / ΔT 3.70 K → flow 29.2…29.5 °C → **29.35 °C**, return **25.65 °C**.
 The uncertainty depends on ΔT and ranges from about ±0.15 K to ±0.5 K.
 
-The estimate assumes the meter **rounds** to whole degrees. If your meter truncates, set
-`temperature_rounding: truncate` on the `SensoStar_MBus:` hub. Compare once with the meter display.
+The estimate assumes the meter **rounds** to whole degrees (default). This was verified on a SensoStar U
+(type S3): display return 25.58 °C was reported as 26 °C over M-Bus. With display values 29.43 / 25.58 °C and
+ΔT 3.84 K the estimate yields 29.42 / 25.58 °C. Should another meter variant truncate instead, set
+`temperature_rounding: truncate` on the `SensoStar_MBus:` hub.
 
 ### Additional values (extended readout)
 
