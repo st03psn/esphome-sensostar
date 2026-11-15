@@ -74,6 +74,19 @@ refresh every *(number of configured extra sensors × update_interval)*. Only co
 | `0x12` / `0x13` / `0x14` | Maximum flow temp / return temp / ΔT | `max_temperature_flow` / `_return` / `_diff` |
 | `0x15` / `0x16` / `0x18` | Due date / energy / volume at due date | `due_date` (text) / `due_date_energy` / `due_date_volume` |
 
+### Entity name prefix
+
+All entity names start with `${name_prefix}` (default `"SensoStar "`). Home Assistant already shows the
+device name in front, so you can drop it in your device file:
+
+```yaml
+substitutions:
+  name_prefix: ""
+```
+
+Changing the prefix changes the entity IDs in Home Assistant; existing automations and helpers must be
+pointed to the new entities (or the new entities renamed to the old IDs).
+
 ### Probe mode (diagnostics)
 
 `probe: true` on the hub alternates normal readouts with probe requests and logs every answer, raw and

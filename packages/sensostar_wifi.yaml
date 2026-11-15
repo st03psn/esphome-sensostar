@@ -35,7 +35,7 @@ web_server:
 # ----- WiFi-spezifischer Sensor: Signalstärke ---------------
 sensor:
   - platform: wifi_signal
-    name: "SensoStar WiFi Signal"
+    name: "${name_prefix}WiFi Signal"
     id: wifi_signal_sensor
     update_interval: 60s
 

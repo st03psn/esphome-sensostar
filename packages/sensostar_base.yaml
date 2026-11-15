@@ -83,49 +83,49 @@ SensoStar_MBus:
 sensor:
   - platform: SensoStar_MBus
     energy:
-      name: "SensoStar Energy"
+      name: "${name_prefix}Energy"
     volume:
-      name: "SensoStar Volume"
+      name: "${name_prefix}Volume"
     power:
-      name: "SensoStar Power"
+      name: "${name_prefix}Power"
     flow:
-      name: "SensoStar Flow"
+      name: "${name_prefix}Flow"
     temperature_flow:
-      name: "SensoStar Flow Temperature"
+      name: "${name_prefix}Flow Temperature"
     temperature_return:
-      name: "SensoStar Return Temperature"
+      name: "${name_prefix}Return Temperature"
     temperature_diff:
-      name: "SensoStar Temperature Difference"
+      name: "${name_prefix}Temperature Difference"
     # Vor-/Rücklauf mit Nachkommastellen, rekonstruiert aus der 0,01-K-Temperaturdifferenz
     # (der Zähler liefert VL/RL nur in ganzen Grad, siehe README)
     temperature_flow_estimated:
-      name: "SensoStar Flow Temperature (estimated)"
+      name: "${name_prefix}Flow Temperature (estimated)"
     temperature_return_estimated:
-      name: "SensoStar Return Temperature (estimated)"
+      name: "${name_prefix}Return Temperature (estimated)"
     # Maximalwerte und Stichtagswerte des Zählers (je ein Wert pro Messzyklus, rotierend)
     max_power:
-      name: "SensoStar Max Power"
+      name: "${name_prefix}Max Power"
     max_flow:
-      name: "SensoStar Max Flow"
+      name: "${name_prefix}Max Flow"
     max_temperature_flow:
-      name: "SensoStar Max Flow Temperature"
+      name: "${name_prefix}Max Flow Temperature"
     max_temperature_return:
-      name: "SensoStar Max Return Temperature"
+      name: "${name_prefix}Max Return Temperature"
     max_temperature_diff:
-      name: "SensoStar Max Temperature Difference"
+      name: "${name_prefix}Max Temperature Difference"
     due_date_energy:
-      name: "SensoStar Due Date Energy"
+      name: "${name_prefix}Due Date Energy"
     due_date_volume:
-      name: "SensoStar Due Date Volume"
+      name: "${name_prefix}Due Date Volume"
     operating_days:
-      name: "SensoStar Operating Days"
+      name: "${name_prefix}Operating Days"
 #    calculated_power:
-#      name: "SensoStar Calculated Power"
+#      name: "${name_prefix}Calculated Power"
 
   - platform: adc
     pin: ${pin_adc_input}
     id: adc_input_sensor
-    name: "SensoStar Battery Level"
+    name: "${name_prefix}Battery Level"
     update_interval: never   # getriggert durch read_adc_script
     filters:
       - lambda: return x * 3.6;   # Vbat via Spannungsteiler 39k--o--15k
@@ -133,6 +133,9 @@ sensor:
 # ----- Substitutions ----------------------------------------
 substitutions:
   api_key_display: !secret api_encryption_key
+  # Präfix vor allen Entitätsnamen. In der Geräte-Datei überschreibbar, z. B. name_prefix: ""
+  # (Home Assistant stellt den Gerätenamen ohnehin voran). Achtung: ändert die Entity-IDs.
+  name_prefix: "SensoStar "
 
 # ----- Text-Sensoren ----------------------------------------
 text_sensor:
@@ -157,13 +160,13 @@ text_sensor:
     
   - platform: SensoStar_MBus
     status:
-      name: "SensoStar Status"
+      name: "${name_prefix}Status"
     serial_number:
-      name: "SensoStar Serial Number"
+      name: "${name_prefix}Serial Number"
     meter_time:
-      name: "SensoStar Meter Time"
+      name: "${name_prefix}Meter Time"
     due_date:
-      name: "SensoStar Due Date"
+      name: "${name_prefix}Due Date"
 
 # ----- Ausgänge (GPIO) --------------------------------------
 output:
