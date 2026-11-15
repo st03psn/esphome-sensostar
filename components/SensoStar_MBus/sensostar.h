@@ -29,14 +29,32 @@ class SensoStarComponent : public PollingComponent, public uart::UARTDevice {
   SUB_SENSOR(temperature_return)
   SUB_SENSOR(temperature_diff)
   SUB_SENSOR(calculated_power)
+  // Estimated flow/return temperature with sub-degree resolution (derived from the 0.01 K delta T)
+  SUB_SENSOR(temperature_flow_estimated)
+  SUB_SENSOR(temperature_return_estimated)
+  // Maximum values reported by the meter (DIF function "maximum")
+  SUB_SENSOR(max_power)
+  SUB_SENSOR(max_flow)
+  SUB_SENSOR(max_temperature_flow)
+  SUB_SENSOR(max_temperature_return)
+  SUB_SENSOR(max_temperature_diff)
+  // Values stored at the last due date (storage number 1)
+  SUB_SENSOR(due_date_energy)
+  SUB_SENSOR(due_date_volume)
+  SUB_SENSOR(operating_days)
 #endif
 
 #ifdef USE_TEXT_SENSOR
   SUB_TEXT_SENSOR(status)
+  SUB_TEXT_SENSOR(serial_number)
+  SUB_TEXT_SENSOR(meter_time)
+  SUB_TEXT_SENSOR(due_date)
 #endif
 
   void set_data_led(output::BinaryOutput *data_led) { this->data_led_ = data_led; } // flash LED 
   void set_probe(bool probe) { this->probe_ = probe; } // diagnostic probe mode
+  // true: meter truncates flow/return temperature to whole degrees; false: rounds (default)
+  void set_temperature_truncated(bool truncated) { this->temperature_truncated_ = truncated; }
   
   void setup() override;
   void dump_config() override;
@@ -56,6 +74,16 @@ class SensoStarComponent : public PollingComponent, public uart::UARTDevice {
   uint8_t init_state_{0};
   bool trigger_next_{true};
   bool FCB_;
+
+  // ----- Extended readout: single-item requests after each normal readout -----
+  void build_extra_list_();
+  void send_extra_(uint32_t now);
+  void publish_estimated_temperatures_(double flow_t, int8_t flow_exp, double return_t, int8_t return_exp, double tdiff);
+  std::vector<uint8_t> extra_ids_;
+  size_t extra_idx_{0};
+  uint32_t extra_due_{0};
+  bool extra_active_{false};
+  bool temperature_truncated_{false};
 
   // ----- Probe mode (diagnostics) -----
   struct Probe {

@@ -96,6 +96,29 @@ sensor:
       name: "SensoStar Return Temperature"
     temperature_diff:
       name: "SensoStar Temperature Difference"
+    # Vor-/Rücklauf mit Nachkommastellen, rekonstruiert aus der 0,01-K-Temperaturdifferenz
+    # (der Zähler liefert VL/RL nur in ganzen Grad, siehe README)
+    temperature_flow_estimated:
+      name: "SensoStar Flow Temperature (estimated)"
+    temperature_return_estimated:
+      name: "SensoStar Return Temperature (estimated)"
+    # Maximalwerte und Stichtagswerte des Zählers (je ein Wert pro Messzyklus, rotierend)
+    max_power:
+      name: "SensoStar Max Power"
+    max_flow:
+      name: "SensoStar Max Flow"
+    max_temperature_flow:
+      name: "SensoStar Max Flow Temperature"
+    max_temperature_return:
+      name: "SensoStar Max Return Temperature"
+    max_temperature_diff:
+      name: "SensoStar Max Temperature Difference"
+    due_date_energy:
+      name: "SensoStar Due Date Energy"
+    due_date_volume:
+      name: "SensoStar Due Date Volume"
+    operating_days:
+      name: "SensoStar Operating Days"
 #    calculated_power:
 #      name: "SensoStar Calculated Power"
 
@@ -135,6 +158,12 @@ text_sensor:
   - platform: SensoStar_MBus
     status:
       name: "SensoStar Status"
+    serial_number:
+      name: "SensoStar Serial Number"
+    meter_time:
+      name: "SensoStar Meter Time"
+    due_date:
+      name: "SensoStar Due Date"
 
 # ----- Ausgänge (GPIO) --------------------------------------
 output:

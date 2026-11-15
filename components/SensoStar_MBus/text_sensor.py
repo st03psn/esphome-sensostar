@@ -7,14 +7,24 @@ from esphome.const import (
 
 from . import SensoStarComponent, CONF_SENSOSTAR_ID
 
+CONF_SERIAL_NUMBER = "serial_number"
+CONF_METER_TIME = "meter_time"
+CONF_DUE_DATE = "due_date"
+
 TYPES = [
     CONF_STATUS,
+    CONF_SERIAL_NUMBER,
+    CONF_METER_TIME,
+    CONF_DUE_DATE,
 ]
 
 CONFIG_SCHEMA = cv.Schema(
     {
         cv.GenerateID(CONF_SENSOSTAR_ID): cv.use_id(SensoStarComponent),
-		cv.Optional(CONF_STATUS): text_sensor.text_sensor_schema(),
+        cv.Optional(CONF_STATUS): text_sensor.text_sensor_schema(),
+        cv.Optional(CONF_SERIAL_NUMBER): text_sensor.text_sensor_schema(icon="mdi:identifier"),
+        cv.Optional(CONF_METER_TIME): text_sensor.text_sensor_schema(icon="mdi:clock-outline"),
+        cv.Optional(CONF_DUE_DATE): text_sensor.text_sensor_schema(icon="mdi:calendar"),
     }
 ).extend(cv.COMPONENT_SCHEMA)
 

@@ -16,6 +16,10 @@ This ESPHome integration enables reading detailed heat consumption data from Eng
   - Flow temperature (°C)
   - Return temperature (°C)
   - Temperature difference (ΔT)
+  - Estimated flow/return temperature with decimals (derived from ΔT, see below)
+  - Maximum power, flow, flow/return temperature and ΔT
+  - Due-date energy, volume and date
+  - Operating days, serial number, meter clock
   - Meter status (text)
   - Battery voltage (via ADC)
 
@@ -35,6 +39,44 @@ This ESPHome integration enables reading detailed heat consumption data from Eng
   - Wi-Fi / Ethernet link status
   - Heartbeat (device activity)
   - New data received from the SensoStar meter
+
+---
+
+### Temperature resolution and estimated temperatures
+
+The SensoStar measures internally with 0.01 °C, but over M-Bus it reports the current flow and return
+temperature only in whole degrees (VIF `0x5B`/`0x5F`). Only ΔT (`0x61`, 0.01 K) and the maximum values
+(`0x59`/`0x5D`, 0.01 °C) carry decimals. This was verified with the component's probe mode against all
+single-item IDs `0x00`–`0x3F`, the standard `REQ_UD2` readout, an application reset and `SND_NKE`.
+
+`temperature_flow_estimated` / `temperature_return_estimated` combine both whole-degree readings with the
+precise ΔT: the true flow temperature must lie within the rounding interval of the flow reading **and**
+equal the return interval shifted by ΔT. The midpoint of that intersection is published.
+Example: 29 °C / 26 °C / ΔT 3.70 K → flow 29.2…29.5 °C → **29.35 °C**, return **25.65 °C**.
+The uncertainty depends on ΔT and ranges from about ±0.15 K to ±0.5 K.
+
+The estimate assumes the meter **rounds** to whole degrees. If your meter truncates, set
+`temperature_rounding: truncate` on the `SensoStar_MBus:` hub. Compare once with the meter display.
+
+### Additional values (extended readout)
+
+After each normal readout the component sends one extra single-item request (round robin), so these values
+refresh every *(number of configured extra sensors × update_interval)*. Only configured sensors are requested.
+
+| Item ID | Value | Option |
+|---|---|---|
+| `0x00` | Fabrication / serial number | `serial_number` (text) |
+| `0x01` | Meter date and time | `meter_time` (text) |
+| `0x0A` | Operating time | `operating_days` |
+| `0x10` / `0x11` | Maximum flow / power | `max_flow` / `max_power` |
+| `0x12` / `0x13` / `0x14` | Maximum flow temp / return temp / ΔT | `max_temperature_flow` / `_return` / `_diff` |
+| `0x15` / `0x16` / `0x18` | Due date / energy / volume at due date | `due_date` (text) / `due_date_energy` / `due_date_volume` |
+
+### Probe mode (diagnostics)
+
+`probe: true` on the hub alternates normal readouts with probe requests and logs every answer, raw and
+decoded, at INFO level. Afterwards the init sequence is re-run. Intended for investigating other meter
+variants; leave it off in normal use.
 
 ---
 

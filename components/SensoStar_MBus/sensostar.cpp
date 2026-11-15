@@ -5,16 +5,13 @@
 #include "esphome/core/log.h"
 #include "esphome/core/helpers.h"
 #include "mbus_decode.h"
+#include <algorithm>
+#include <cmath>
 
 namespace esphome {
 namespace sensostar {
 
 static const char *const TAG = "SensoStar";
-
-void SensoStarComponent::setup() {
-    if (this->probe_)
-        this->build_probe_list_();
-}
 
 // Build a long frame 68 L L 68 <body> CS 16
 static std::vector<uint8_t> long_frame(std::initializer_list<uint8_t> body) {
@@ -27,6 +24,82 @@ static std::vector<uint8_t> long_frame(std::initializer_list<uint8_t> body) {
 }
 static std::vector<uint8_t> short_frame(uint8_t c, uint8_t a) {
     return {0x10, c, a, (uint8_t) (c + a), 0x16};
+}
+
+void SensoStarComponent::setup() {
+    this->build_extra_list_();
+    if (this->probe_)
+        this->build_probe_list_();
+}
+
+// Item IDs of the meter's proprietary selection command (determined with the probe mode on a
+// SensoStar; the normal readout uses 02 03 04 06 05 07 08 09 0B):
+//   00 fabrication no.  01 date/time  0A operating time  10 max flow  11 max power
+//   12 max flow temp  13 max return temp  14 max delta T  15 due date  16 due-date energy  18 due-date volume
+void SensoStarComponent::build_extra_list_() {
+#ifdef USE_TEXT_SENSOR
+    if (this->serial_number_text_sensor_) this->extra_ids_.push_back(0x00);
+    if (this->meter_time_text_sensor_) this->extra_ids_.push_back(0x01);
+    if (this->due_date_text_sensor_) this->extra_ids_.push_back(0x15);
+#endif
+#ifdef USE_SENSOR
+    if (this->operating_days_sensor_) this->extra_ids_.push_back(0x0A);
+    if (this->max_flow_sensor_) this->extra_ids_.push_back(0x10);
+    if (this->max_power_sensor_) this->extra_ids_.push_back(0x11);
+    if (this->max_temperature_flow_sensor_) this->extra_ids_.push_back(0x12);
+    if (this->max_temperature_return_sensor_) this->extra_ids_.push_back(0x13);
+    if (this->max_temperature_diff_sensor_) this->extra_ids_.push_back(0x14);
+    if (this->due_date_energy_sensor_) this->extra_ids_.push_back(0x16);
+    if (this->due_date_volume_sensor_) this->extra_ids_.push_back(0x18);
+#endif
+}
+
+void SensoStarComponent::send_extra_(uint32_t now) {
+    uint8_t id = this->extra_ids_[this->extra_idx_ % this->extra_ids_.size()];
+    this->extra_idx_++;
+    std::vector<uint8_t> msg = long_frame({0x53, 0xFE, 0x51, 0x0F, 0x00, 0x00, 0x01, 0x59, id});
+    ESP_LOGV(TAG, "M-Bus write (item 0x%02X): %s", id, format_hex_pretty(msg).c_str());
+    this->flush();
+    this->data_.clear();
+    this->write_array(msg.data(), msg.size());
+    this->last_transmission_ = now;
+    this->last_send_tx_offset_ = msg.size() * 11 * 1000 / 2400;
+    this->receiving_ = 1;
+    this->extra_active_ = true;
+}
+
+// The meter reports flow/return temperature in whole degrees but delta T in 0.01 K.
+// Both whole-degree readings bound the true values; delta T links them, which narrows the range:
+//   flow in [Fi+lo, Fi+hi)  and  flow = return + dT with return in [Ri+lo, Ri+hi)
+// lo/hi = -0.5/+0.5 when the meter rounds, 0/1 when it truncates. The midpoint is published.
+void SensoStarComponent::publish_estimated_temperatures_(double flow_t, int8_t flow_exp, double return_t,
+                                                         int8_t return_exp, double tdiff) {
+#ifdef USE_SENSOR
+    if (this->temperature_flow_estimated_sensor_ == nullptr && this->temperature_return_estimated_sensor_ == nullptr)
+        return;
+    if (std::isnan(flow_t) || std::isnan(return_t) || tdiff == -127)
+        return;
+    double est_flow;
+    if (flow_exp < 0 && return_exp < 0) {
+        est_flow = flow_t;  // meter already delivers sub-degree values
+    } else {
+        const double lo = this->temperature_truncated_ ? 0.0 : -0.5;
+        const double hi = this->temperature_truncated_ ? 1.0 : 0.5;
+        double a = std::max(flow_t + lo, return_t + lo + tdiff);
+        double b = std::min(flow_t + hi, return_t + hi + tdiff);
+        if (a > b) {
+            ESP_LOGD(TAG, "Temperature estimate inconsistent (F=%.0f R=%.0f dT=%.2f)", flow_t, return_t, tdiff);
+            a = flow_t + lo;
+            b = flow_t + hi;
+        }
+        est_flow = (a + b) / 2;
+        ESP_LOGV(TAG, "Flow temperature estimate %.3f (range %.2f..%.2f)", est_flow, a, b);
+    }
+    if (this->temperature_flow_estimated_sensor_)
+        this->temperature_flow_estimated_sensor_->publish_state(est_flow);
+    if (this->temperature_return_estimated_sensor_)
+        this->temperature_return_estimated_sensor_->publish_state(est_flow - tdiff);
+#endif
 }
 
 void SensoStarComponent::build_probe_list_() {
@@ -125,6 +198,13 @@ void SensoStarComponent::loop() {
     }
 
     if ( this->receiving_ > 0 && ( now - this->last_transmission_ >= 500 + this->last_send_tx_offset_ ) ) {
+        if (this->extra_active_) {
+            ESP_LOGD(TAG, "No answer to extended readout request");
+            this->data_.clear();
+            this->receiving_ = 0;
+            this->extra_active_ = false;
+            return;
+        }
         if (this->probe_active_) {
             std::string partial = this->data_.empty() ? "no answer" : "timeout, partial: " + format_hex_pretty(this->data_);
             this->data_.clear();
@@ -161,6 +241,10 @@ void SensoStarComponent::loop() {
                     this->probe_finish_("ACK (E5)");
                     continue;
                 }
+                if (this->extra_active_) {
+                    this->extra_active_ = false;
+                    continue;
+                }
                 
                 if (this->init_state_ != 0xff)
                     this->init_state_ |= 0x10;
@@ -187,17 +271,20 @@ void SensoStarComponent::loop() {
                 this->probe_finish_(nullptr);
                 continue;
             }
+            // Answers to extended readout requests never invalidate the main values
+            const bool is_extra = this->extra_active_;
+            this->extra_active_ = false;
             
             if (this->data_[0] != 0x68 || this->data_[3] != 0x68){
-                this->publish_nans_();
+                if (!is_extra) this->publish_nans_();
                 ESP_LOGW(TAG, "Invalid frame start");
             }
             else if (this->data_[1] != this->data_[2]){
-                this->publish_nans_();
+                if (!is_extra) this->publish_nans_();
                 ESP_LOGW(TAG, "Invalid length");
             }
             else if (this->data_[this->data_.size()-1] != 0x16){
-                this->publish_nans_();
+                if (!is_extra) this->publish_nans_();
                 ESP_LOGW(TAG, "Invalid stop");
             }
             else {
@@ -206,7 +293,7 @@ void SensoStarComponent::loop() {
                     checksum += this->data_[i];
                 
                 if (checksum != this->data_[this->data_.size()-2]){
-                    this->publish_nans_();
+                    if (!is_extra) this->publish_nans_();
                     ESP_LOGW(TAG, "Invalid checksum");
                 }
                 else if (this->init_state_ != 0xff){
@@ -214,13 +301,16 @@ void SensoStarComponent::loop() {
                     this->init_state_ |= 0x10;
                 }
                 else if (this->data_[4] != 0x08 || this->data_[6] != 0x72 ){
-                    this->publish_nans_();
+                    if (!is_extra) this->publish_nans_();
                     ESP_LOGW(TAG, "Unknown frame");
                 }
                 else {
                     // Store values for calculated_power
                     double flow = -127;
                     double tdiff = -127;
+                    // Raw flow/return temperature for the sub-degree estimate
+                    double flow_t = NAN, return_t = NAN;
+                    int8_t flow_t_exp = 0, return_t_exp = 0;
                     // Decode
 					this->flash_data_led_(); // Flash LED when new data arrived
                     uint8_t i = 19; // Skip start header and fixed data header
@@ -267,53 +357,127 @@ void SensoStarComponent::loop() {
                         }
                         // Parce
                         // DIF
-                        uint8_t f = ( this->data_[i_DIF]&0x30 ) >> 4; // Function (normal 0x00 for instantaneous value)
+                        uint8_t dif = this->data_[i_DIF];
+                        uint8_t f = ( dif&0x30 ) >> 4; // Function: 0 instantaneous, 1 maximum, 2 minimum, 3 error
+                        uint8_t storage = ( dif&0x40 ) >> 6; // Storage number LSB: 0 current, 1 due date
+                        bool has_dife = ( dif&0x80 ) == 0x80; // tariff/storage extensions: not a plain current value
+                        bool cur = f == 0x00 && storage == 0 && !has_dife;
+                        bool is_max = f == 0x01 && storage == 0 && !has_dife;
+                        bool due = f == 0x00 && storage == 1 && !has_dife;
                         // VIF
                         uint8_t vif = this->data_[i_VIF] & 0x7f;
-                        if ( (vif&0x78) == 0x00 && f == 0x00){ // Energy (Wh)
+                        bool vif_ext = this->data_[i_VIF] == 0xfd || this->data_[i_VIF] == 0xfb;
+                        if (vif_ext && !(this->data_[i_VIF] == 0xfd && this->data_[i_VIF+1] == 0x17)) {
+                            // other extended VIFs (e.g. FD 0C version) are not used
+                        }
+                        else if ( (vif&0x78) == 0x00 && !vif_ext && (cur || due) ){ // Energy (Wh)
 #ifdef USE_SENSOR
-                            if (this->energy_sensor_)
-                                this->energy_sensor_->publish_state(convert_value(result, (vif&0x07) - 3) / 1000);
+                            double kwh = convert_value(result, (vif&0x07) - 3) / 1000;
+                            if (cur && this->energy_sensor_)
+                                this->energy_sensor_->publish_state(kwh);
+                            if (due && this->due_date_energy_sensor_)
+                                this->due_date_energy_sensor_->publish_state(kwh);
 #endif
                         }
-                        else if ( (vif&0x78) == 0x10 && f == 0x00){ // Volume (m3)
+                        else if ( (vif&0x78) == 0x10 && (cur || due) ){ // Volume (m3)
 #ifdef USE_SENSOR
-                            if (this->volume_sensor_)
-                                this->volume_sensor_->publish_state(convert_value(result, (vif&0x07) - 6));
+                            double m3 = convert_value(result, (vif&0x07) - 6);
+                            if (cur && this->volume_sensor_)
+                                this->volume_sensor_->publish_state(m3);
+                            if (due && this->due_date_volume_sensor_)
+                                this->due_date_volume_sensor_->publish_state(m3);
 #endif
                         }
-                        else if ( (vif&0x78) == 0x28 && f == 0x00){ // Power (W)
-                            int8_t decimals = (vif&0x07) - 3;
-                            double val = ((int32_t)result) * std::pow(10, decimals);
+                        else if ( (vif&0x78) == 0x28 && (cur || is_max) ){ // Power (W)
 #ifdef USE_SENSOR
-                            if (this->power_sensor_)
-                                this->power_sensor_->publish_state(convert_value(result, (vif&0x07) - 3));
+                            double w = convert_value(result, (vif&0x07) - 3);
+                            if (cur && this->power_sensor_)
+                                this->power_sensor_->publish_state(w);
+                            if (is_max && this->max_power_sensor_)
+                                this->max_power_sensor_->publish_state(w);
 #endif
                         }
-                        else if ( (vif&0x78) == 0x38 && f == 0x00){ // Volume Flow (m3/h)
+                        else if ( (vif&0x78) == 0x38 && (cur || is_max) ){ // Volume Flow (m3/h)
 #ifdef USE_SENSOR
-                            flow = convert_value(result, (vif&0x07) - 6);
-                            if (this->flow_sensor_)
-                                this->flow_sensor_->publish_state(flow);
+                            double v = convert_value(result, (vif&0x07) - 6);
+                            if (cur) {
+                                flow = v;
+                                if (this->flow_sensor_)
+                                    this->flow_sensor_->publish_state(flow);
+                            }
+                            if (is_max && this->max_flow_sensor_)
+                                this->max_flow_sensor_->publish_state(v);
 #endif
                         }
-                        else if ( (vif&0x7C) == 0x58 && f == 0x00){ // Flow Temperature (C)
+                        else if ( (vif&0x7C) == 0x58 && (cur || is_max) ){ // Flow Temperature (C)
 #ifdef USE_SENSOR
-                            if (this->temperature_flow_sensor_)
-                                this->temperature_flow_sensor_->publish_state(convert_value(result, (vif&0x03) - 3));
+                            double t = convert_value(result, (vif&0x03) - 3);
+                            if (cur) {
+                                flow_t = t;
+                                flow_t_exp = (vif&0x03) - 3;
+                                if (this->temperature_flow_sensor_)
+                                    this->temperature_flow_sensor_->publish_state(t);
+                            }
+                            if (is_max && this->max_temperature_flow_sensor_)
+                                this->max_temperature_flow_sensor_->publish_state(t);
 #endif
                         }
-                        else if ( (vif&0x7C) == 0x5c && f == 0x00){ // Return Temperature (C)
+                        else if ( (vif&0x7C) == 0x5c && (cur || is_max) ){ // Return Temperature (C)
 #ifdef USE_SENSOR
-                            if (this->temperature_return_sensor_)
-                                this->temperature_return_sensor_->publish_state(convert_value(result, (vif&0x03) - 3));
+                            double t = convert_value(result, (vif&0x03) - 3);
+                            if (cur) {
+                                return_t = t;
+                                return_t_exp = (vif&0x03) - 3;
+                                if (this->temperature_return_sensor_)
+                                    this->temperature_return_sensor_->publish_state(t);
+                            }
+                            if (is_max && this->max_temperature_return_sensor_)
+                                this->max_temperature_return_sensor_->publish_state(t);
 #endif
                         }
-                        else if ( (vif&0x7C) == 0x60 && f == 0x00){ // Temperature Difference (K)
+                        else if ( (vif&0x7C) == 0x60 && (cur || is_max) ){ // Temperature Difference (K)
 #ifdef USE_SENSOR
-                            tdiff = convert_value(result, (vif&0x03) - 3);
-                            if (this->temperature_diff_sensor_)
-                                this->temperature_diff_sensor_->publish_state(tdiff);
+                            double t = convert_value(result, (vif&0x03) - 3);
+                            if (cur) {
+                                tdiff = t;
+                                if (this->temperature_diff_sensor_)
+                                    this->temperature_diff_sensor_->publish_state(tdiff);
+                            }
+                            if (is_max && this->max_temperature_diff_sensor_)
+                                this->max_temperature_diff_sensor_->publish_state(t);
+#endif
+                        }
+                        else if ( (vif&0x7C) == 0x20 && cur ){ // On time (s/min/h/d)
+#ifdef USE_SENSOR
+                            static const double TO_DAYS[4] = {1.0 / 86400, 1.0 / 1440, 1.0 / 24, 1.0};
+                            if (this->operating_days_sensor_)
+                                this->operating_days_sensor_->publish_state((int32_t) result * TO_DAYS[vif&0x03]);
+#endif
+                        }
+                        else if ( vif == 0x78 && cur ){ // Fabrication number
+#ifdef USE_TEXT_SENSOR
+                            if (this->serial_number_text_sensor_)
+                                this->serial_number_text_sensor_->publish_state(to_string(result));
+#endif
+                        }
+                        else if ( vif == 0x6D && lc == 0x04 ){ // Date and time (type F)
+#ifdef USE_TEXT_SENSOR
+                            uint8_t b0 = result & 0xff, b1 = (result >> 8) & 0xff, b2 = (result >> 16) & 0xff, b3 = result >> 24;
+                            char buf[20];
+                            snprintf(buf, sizeof(buf), "%04u-%02u-%02u %02u:%02u",
+                                     2000 + (((b2 & 0xE0) >> 5) | ((b3 & 0xF0) >> 1)), b3 & 0x0F, b2 & 0x1F, b1 & 0x1F, b0 & 0x3F);
+                            if (cur && this->meter_time_text_sensor_)
+                                this->meter_time_text_sensor_->publish_state(buf);
+#endif
+                        }
+                        else if ( vif == 0x6C && lc == 0x02 ){ // Date (type G)
+#ifdef USE_TEXT_SENSOR
+                            uint8_t b0 = result & 0xff, b1 = (result >> 8) & 0xff;
+                            char buf[12];
+                            snprintf(buf, sizeof(buf), "%04u-%02u-%02u",
+                                     2000 + (((b0 & 0xE0) >> 5) | ((b1 & 0xF0) >> 1)), b1 & 0x0F, b0 & 0x1F);
+                            if (due && this->due_date_text_sensor_)
+                                this->due_date_text_sensor_->publish_state(buf);
 #endif
                         }
                         else if ( this->data_[i_VIF] == 0xfd && this->data_[i_VIF+1] == 0x17 ) { // Error flags (binary)
@@ -380,13 +544,13 @@ void SensoStarComponent::loop() {
                         }
                         else {
                             // Unknown
-                            ESP_LOGW(TAG, "Unsupported value type 0x%02x", vif);
-                            break;
+                            ESP_LOGD(TAG, "Skipping value type 0x%02x (DIF 0x%02x)", vif, dif);
                         }
                     }
                     
 #ifdef USE_SENSOR
-                    if (this->calculated_power_sensor_) {
+                    this->publish_estimated_temperatures_(flow_t, flow_t_exp, return_t, return_t_exp, tdiff);
+                    if (this->calculated_power_sensor_ && (tdiff != -127 || flow != -127)) {
                         if (tdiff == -127 || flow == -127)
                             this->calculated_power_sensor_->publish_state(NAN);
                         else if (flow > 0)
@@ -395,7 +559,9 @@ void SensoStarComponent::loop() {
                             this->calculated_power_sensor_->publish_state(0);
                     }
 #endif
-
+                    // Follow every normal readout with one single-item request (round robin)
+                    if (!is_extra && !this->extra_ids_.empty())
+                        this->extra_due_ = now + 300;
                 }
             }
             
@@ -404,7 +570,13 @@ void SensoStarComponent::loop() {
         }
     }
     
-    if (this->trigger_next_ && !this->probe_active_) {  // never interrupt a pending probe
+    if (this->extra_due_ != 0 && (int32_t) (now - this->extra_due_) >= 0 && this->receiving_ == 0 &&
+        !this->probe_active_ && this->init_state_ == 0xff) {
+        this->extra_due_ = 0;
+        this->send_extra_(now);
+    }
+
+    if (this->trigger_next_ && !this->probe_active_ && !this->extra_active_) {  // never interrupt a pending request
         this->trigger_next_ = false;
 
         this->flush();
